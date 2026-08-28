@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { getCurrentUser, onAuthChange } from '@/lib/auth';
 import { createDeck, updateDeck, Timestamp } from '@/lib/firestore';
-import { analyzeDeck } from '@/lib/ai';
+import { uploadDeck } from '@/lib/storage';
 import { User } from 'firebase/auth';
 import { useRouter } from 'next/navigation';
 import { useDropzone } from 'react-dropzone';
@@ -15,6 +15,7 @@ export default function AnalyzePage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState('');
+  const [uploadProgress, setUploadProgress] = useState(0);
   const router = useRouter();
 
   useEffect(() => {
@@ -29,7 +30,11 @@ export default function AnalyzePage() {
   }, [router]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    accept: {'application/pdf': ['.pdf'], 'application/vnd.ms-powerpoint': ['.ppt', '.pptx']},
+    accept: {
+      'application/pdf': ['.pdf'],
+      'application/vnd.ms-powerpoint': ['.ppt', '.pptx'],
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['.pptx'],
+    },
     maxFiles: 1,
     onDrop: (acceptedFiles) => {
       if (acceptedFiles.length > 0) {
@@ -44,9 +49,10 @@ export default function AnalyzePage() {
 
     setAnalyzing(true);
     setError('');
+    setUploadProgress(0);
 
     try {
-      // Create deck record
+      // Step 1: Create deck record
       const deckId = await createDeck({
         userId: user.uid,
         fileName: file.name,
@@ -54,20 +60,43 @@ export default function AnalyzePage() {
         createdAt: Timestamp.now(),
       });
 
-      // Read file content (mock - in production, upload to Firebase Storage)
+      setUploadProgress(20);
+
+      // Step 2: Upload file to Firebase Storage
+      const fileUrl = await uploadDeck(file, deckId);
+      
+      setUploadProgress(40);
+
+      // Step 3: Read file content for analysis
       const text = await file.text();
       
-      // Analyze deck
-      const analysis = await analyzeDeck(text);
-      
-      // Update deck with results
-      await updateDeck(deckId, {
-        readinessScore: analysis.readinessScore,
-        feedback: analysis,
-        status: 'completed',
+      setUploadProgress(60);
+
+      // Step 4: Call AI analysis API
+      const response = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deckText: text, fileName: file.name }),
       });
 
-      setResult(analysis);
+      const data = await response.json();
+
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      setUploadProgress(80);
+
+      // Step 5: Update deck with results
+      await updateDeck(deckId, {
+        readinessScore: data.analysis.readinessScore,
+        feedback: data.analysis,
+        status: 'completed',
+        fileUrl,
+      });
+
+      setUploadProgress(100);
+      setResult(data.analysis);
     } catch (err: any) {
       setError(err.message || 'Analysis failed');
     } finally {
@@ -115,6 +144,18 @@ export default function AnalyzePage() {
                 <p className="text-gray-600">Drag & drop or click to browse</p>
               )}
             </div>
+
+            {uploadProgress > 0 && uploadProgress < 100 && (
+              <div className="mt-4">
+                <div className="bg-gray-200 rounded-full h-2">
+                  <div
+                    className="bg-blue-600 h-2 rounded-full transition-all"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                </div>
+                <p className="text-sm text-gray-600 mt-2">Processing: {uploadProgress}%</p>
+              </div>
+            )}
 
             {error && (
               <div className="mt-4 bg-red-50 text-red-600 p-3 rounded-lg">
